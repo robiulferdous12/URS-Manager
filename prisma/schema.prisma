@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Project {
+  id                String             @id @default(uuid())
+  name              String
+  description       String?
+  department        String?
+  cep               String?
+  startDate         DateTime?
+  endDate           DateTime?
+  budget            Float              @default(0)
+  status            String             @default("Active")
+  priority          String             @default("Medium")
+  order             Int                @default(0)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  ursItems          UrsItem[]
+  quotations        Quotation[]
+  vendorProfiles    VendorProfile[]
+  comparisonResults ComparisonResult[]
+}
+
+model VendorProfile {
+  id           String             @id @default(uuid())
+  projectId    String
+  vendorName   String
+  combinedText String?            @db.Text
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  documents    VendorDocument[]
+  results      ComparisonResult[]
+}
+
+model VendorDocument {
+  id              String        @id @default(uuid())
+  vendorProfileId String
+  fileName        String
+  fileType        String
+  fileUrl         String?
+  extractedText   String?       @db.Text
+  createdAt       DateTime      @default(now())
+  vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+}
+
+model ComparisonResult {
+  id                 String        @id @default(uuid())
+  projectId          String
+  vendorProfileId    String
+  ursItemId          String
+  vendorProposedSpec String?       @db.Text
+  status             String
+  remarks            String?       @db.Text
+  createdAt          DateTime      @default(now())
+  project            Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  vendorProfile      VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorProfileId, ursItemId])
+}
+
+model UrsItem {
+  id             String   @id @default(uuid())
+  projectId      String
+  section        String?
+  slNo           Int      @default(0)
+  description    String
+  specifications String?
+  unit           String?
+  quantity       Float    @default(0)
+  remarks        String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model Quotation {
+  id         String          @id @default(uuid())
+  projectId  String
+  vendorName String
+  uploadedAt DateTime        @default(now())
+  project    Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items      QuotationItem[]
+}
+
+model QuotationItem {
+  id          String    @id @default(uuid())
+  quotationId String
+  ursItemId   String?
+  description String
+  unit        String?
+  quantity    Float     @default(0)
+  unitRate    Float     @default(0)
+  totalPrice  Float     @default(0)
+  remarks     String?
+  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  role      String   @default("USER")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
