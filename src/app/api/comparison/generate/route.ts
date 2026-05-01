@@ -193,7 +193,8 @@ export async function POST(req: NextRequest) {
                                 remarks: r.remarks,
                             },
                         })
-                    )
+                    ),
+                    { timeout: 30000 } // 30s timeout per batch
                 );
             }
             console.log(`✓ Saved ${results.length} results in ${Math.ceil(results.length / BATCH_SIZE)} batches`);

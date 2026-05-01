@@ -309,16 +309,7 @@ export default function ComparisonView({ projectId }: Props) {
                     const result = getResultForCell(item.id, v.id);
                     row.push(result?.vendorProposedSpec || "—");
                     row.push(result?.status || "—");
-                    
-                    let remarks = result?.remarks || "—";
-                    if (remarks !== "—") {
-                        // Inject proper line breaks for Excel readability
-                        remarks = remarks
-                            .replace(/\s*COMPARISON:/g, "\n\nCOMPARISON:")
-                            .replace(/\s*VERDICT:/g, "\n\nVERDICT:")
-                            .trim();
-                    }
-                    row.push(remarks);
+                    row.push(result?.remarks || "—");
                 });
 
                 rows.push(row);

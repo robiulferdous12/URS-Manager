@@ -90,7 +90,6 @@ async function extractFromPDF(buffer: Buffer): Promise<ParseResult> {
     try {
         // Dynamic import handles CommonJS interop gracefully in Next.js
         // Import lib/pdf-parse.js directly to bypass the isDebugMode bug in index.js
-        // @ts-ignore - no types available for the direct JS path
         const pdfParseModule = await import("pdf-parse/lib/pdf-parse.js");
         const pdfParse = pdfParseModule.default || pdfParseModule;
         
