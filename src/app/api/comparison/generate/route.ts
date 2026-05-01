@@ -170,9 +170,9 @@ export async function POST(req: NextRequest) {
             const BATCH_SIZE = 10;
             for (let i = 0; i < results.length; i += BATCH_SIZE) {
                 const chunk = results.slice(i, i + BATCH_SIZE);
-                await prisma.$transaction(
-                    chunk.map((r) =>
-                        prisma.comparisonResult.upsert({
+                await prisma.$transaction(async (tx) => {
+                    for (const r of chunk) {
+                        await tx.comparisonResult.upsert({
                             where: {
                                 vendorProfileId_ursItemId: {
                                     vendorProfileId: r.vendorProfileId,
@@ -192,10 +192,9 @@ export async function POST(req: NextRequest) {
                                 status: r.status,
                                 remarks: r.remarks,
                             },
-                        })
-                    ),
-                    { timeout: 30000 } // 30s timeout per batch
-                );
+                        });
+                    }
+                }, { timeout: 15000 });
             }
             console.log(`✓ Saved ${results.length} results in ${Math.ceil(results.length / BATCH_SIZE)} batches`);
         }
