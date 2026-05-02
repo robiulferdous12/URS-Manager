@@ -15,6 +15,8 @@ import {
     ChevronRight,
     Building2,
     RefreshCw,
+    Undo2,
+    Redo2,
 } from "lucide-react";
 import { UrsItem, VendorProfile, ComparisonResult } from "@/lib/types";
 import * as XLSX from "xlsx";
@@ -39,6 +41,12 @@ export default function ComparisonView({ projectId }: Props) {
     const [success, setSuccess] = useState<string | null>(null);
     const [expandedRow, setExpandedRow] = useState<string | null>(null);
     const [selectedModel, setSelectedModel] = useState<string>("auto");
+    const [undoHistory, setUndoHistory] = useState<Record<string, ComparisonResult[]>>({});
+    const [redoHistory, setRedoHistory] = useState<Record<string, ComparisonResult[]>>({});
+    const [undoingId, setUndoingId] = useState<string | null>(null);
+    const [vendorUndoHistory, setVendorUndoHistory] = useState<Record<string, ComparisonResult[][]>>({});
+    const [vendorRedoHistory, setVendorRedoHistory] = useState<Record<string, ComparisonResult[][]>>({});
+    const [undoingVendorId, setUndoingVendorId] = useState<string | null>(null);
 
     const fetchData = useCallback(async () => {
         try {
@@ -126,6 +134,8 @@ export default function ComparisonView({ projectId }: Props) {
     };
 
     const handleGenerateVendor = async (vendorId: string, vendorName: string) => {
+        const currentVendorResults = results.filter((r) => r.vendorProfileId === vendorId);
+        
         try {
             setGeneratingVendorId(vendorId);
             setError(null);
@@ -138,6 +148,19 @@ export default function ComparisonView({ projectId }: Props) {
 
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || "Failed to analyze vendor");
+
+            if (currentVendorResults.length > 0) {
+                setVendorUndoHistory(prev => ({
+                    ...prev,
+                    [vendorId]: [...(prev[vendorId] || []), currentVendorResults]
+                }));
+                // Clear redo history when new evaluation occurs
+                setVendorRedoHistory((prev) => {
+                    const newRedo = { ...prev };
+                    delete newRedo[vendorId];
+                    return newRedo;
+                });
+            }
 
             await fetchData();
 
@@ -155,6 +178,8 @@ export default function ComparisonView({ projectId }: Props) {
 
     const handleReEvalSingle = async (ursItemId: string, vendorId: string) => {
         const key = `${ursItemId}_${vendorId}`;
+        const currentResult = getResultForCell(ursItemId, vendorId);
+        
         try {
             setReEvalId(key);
             setError(null);
@@ -168,6 +193,20 @@ export default function ComparisonView({ projectId }: Props) {
 
             // Update local state instead of refreshing the whole page
             if (data.result) {
+                // Save to history before updating
+                if (currentResult) {
+                    setUndoHistory((prev) => ({
+                        ...prev,
+                        [key]: [...(prev[key] || []), currentResult]
+                    }));
+                    // Clear redo history when new evaluation occurs
+                    setRedoHistory((prev) => {
+                        const newRedo = { ...prev };
+                        delete newRedo[key];
+                        return newRedo;
+                    });
+                }
+
                 setResults((prev) => {
                     const index = prev.findIndex((r) => r.ursItemId === ursItemId && r.vendorProfileId === vendorId);
                     if (index >= 0) {
@@ -184,6 +223,259 @@ export default function ComparisonView({ projectId }: Props) {
             showMessage(err.message, "error");
         } finally {
             setReEvalId(null);
+        }
+    };
+
+    const handleUndoSingle = async (ursItemId: string, vendorId: string) => {
+        const key = `${ursItemId}_${vendorId}`;
+        const history = undoHistory[key];
+        if (!history || history.length === 0) return;
+
+        const previousResult = history[history.length - 1];
+        const currentResult = getResultForCell(ursItemId, vendorId);
+        
+        try {
+            setUndoingId(key);
+            setError(null);
+            
+            const res = await fetch("/api/comparison/results", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    id: previousResult.id,
+                    vendorProposedSpec: previousResult.vendorProposedSpec,
+                    status: previousResult.status,
+                    remarks: previousResult.remarks
+                }),
+            });
+            
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.error || "Failed to restore previous version");
+            }
+            
+            const updatedResult = await res.json();
+            
+            // Add current result to redo history
+            if (currentResult) {
+                setRedoHistory(prev => ({
+                    ...prev,
+                    [key]: [...(prev[key] || []), currentResult]
+                }));
+            }
+            
+            // Remove the last item from history
+            setUndoHistory(prev => {
+                const newHistory = { ...prev };
+                newHistory[key] = newHistory[key].slice(0, -1);
+                return newHistory;
+            });
+            
+            // Update results state
+            setResults((prev) => {
+                const index = prev.findIndex((r) => r.id === updatedResult.id);
+                if (index >= 0) {
+                    const newResults = [...prev];
+                    newResults[index] = updatedResult;
+                    return newResults;
+                }
+                return prev;
+            });
+            
+            showMessage("Restored previous version successfully", "success");
+        } catch (err: any) {
+            showMessage(err.message, "error");
+        } finally {
+            setUndoingId(null);
+        }
+    };
+
+    const handleRedoSingle = async (ursItemId: string, vendorId: string) => {
+        const key = `${ursItemId}_${vendorId}`;
+        const history = redoHistory[key];
+        if (!history || history.length === 0) return;
+
+        const nextResult = history[history.length - 1];
+        const currentResult = getResultForCell(ursItemId, vendorId);
+        
+        try {
+            setUndoingId(key);
+            setError(null);
+            
+            const res = await fetch("/api/comparison/results", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    id: nextResult.id,
+                    vendorProposedSpec: nextResult.vendorProposedSpec,
+                    status: nextResult.status,
+                    remarks: nextResult.remarks
+                }),
+            });
+            
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.error || "Failed to restore version");
+            }
+            
+            const updatedResult = await res.json();
+            
+            // Add current result back to undo history
+            if (currentResult) {
+                setUndoHistory(prev => ({
+                    ...prev,
+                    [key]: [...(prev[key] || []), currentResult]
+                }));
+            }
+
+            // Remove the last item from redo history
+            setRedoHistory(prev => {
+                const newHistory = { ...prev };
+                newHistory[key] = newHistory[key].slice(0, -1);
+                return newHistory;
+            });
+            
+            // Update results state
+            setResults((prev) => {
+                const index = prev.findIndex((r) => r.id === updatedResult.id);
+                if (index >= 0) {
+                    const newResults = [...prev];
+                    newResults[index] = updatedResult;
+                    return newResults;
+                }
+                return prev;
+            });
+            
+            showMessage("Restored version successfully", "success");
+        } catch (err: any) {
+            showMessage(err.message, "error");
+        } finally {
+            setUndoingId(null);
+        }
+    };
+
+    const handleUndoVendor = async (vendorId: string) => {
+        const history = vendorUndoHistory[vendorId];
+        if (!history || history.length === 0) return;
+
+        const previousResults = history[history.length - 1];
+        const currentVendorResults = results.filter((r) => r.vendorProfileId === vendorId);
+        
+        try {
+            setUndoingVendorId(vendorId);
+            setError(null);
+            
+            const res = await fetch("/api/comparison/results", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(previousResults.map(r => ({
+                    id: r.id,
+                    vendorProposedSpec: r.vendorProposedSpec,
+                    status: r.status,
+                    remarks: r.remarks
+                }))),
+            });
+            
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.error || "Failed to restore previous vendor version");
+            }
+            
+            const updatedResults = await res.json();
+            
+            // Add current to redo history
+            if (currentVendorResults.length > 0) {
+                setVendorRedoHistory(prev => ({
+                    ...prev,
+                    [vendorId]: [...(prev[vendorId] || []), currentVendorResults]
+                }));
+            }
+            
+            // Remove the last item from history
+            setVendorUndoHistory(prev => {
+                const newHistory = { ...prev };
+                newHistory[vendorId] = newHistory[vendorId].slice(0, -1);
+                return newHistory;
+            });
+            
+            // Update results state
+            setResults((prev) => {
+                const newResults = [...prev];
+                updatedResults.forEach((updated: ComparisonResult) => {
+                    const index = newResults.findIndex((r) => r.id === updated.id);
+                    if (index >= 0) {
+                        newResults[index] = updated;
+                    }
+                });
+                return newResults;
+            });
+            
+            showMessage("Restored previous vendor analysis successfully", "success");
+        } catch (err: any) {
+            showMessage(err.message, "error");
+        } finally {
+            setUndoingVendorId(null);
+        }
+    };
+
+    const handleRedoVendor = async (vendorId: string) => {
+        const history = vendorRedoHistory[vendorId];
+        if (!history || history.length === 0) return;
+
+        const nextResults = history[history.length - 1];
+        const currentVendorResults = results.filter((r) => r.vendorProfileId === vendorId);
+        
+        try {
+            setUndoingVendorId(vendorId);
+            setError(null);
+            
+            const res = await fetch("/api/comparison/results", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(nextResults.map(r => ({
+                    id: r.id,
+                    vendorProposedSpec: r.vendorProposedSpec,
+                    status: r.status,
+                    remarks: r.remarks
+                }))),
+            });
+            
+            if (!res.ok) {
+                const errData = await res.json();
+                throw new Error(errData.error || "Failed to restore vendor version");
+            }
+            
+            const updatedResults = await res.json();
+
+            if (currentVendorResults.length > 0) {
+                setVendorUndoHistory(prev => ({
+                    ...prev,
+                    [vendorId]: [...(prev[vendorId] || []), currentVendorResults]
+                }));
+            }
+            
+            setVendorRedoHistory(prev => {
+                const newHistory = { ...prev };
+                newHistory[vendorId] = newHistory[vendorId].slice(0, -1);
+                return newHistory;
+            });
+            
+            setResults((prev) => {
+                const newResults = [...prev];
+                updatedResults.forEach((updated: ComparisonResult) => {
+                    const index = newResults.findIndex((r) => r.id === updated.id);
+                    if (index >= 0) {
+                        newResults[index] = updated;
+                    }
+                });
+                return newResults;
+            });
+            
+            showMessage("Restored vendor analysis successfully", "success");
+        } catch (err: any) {
+            showMessage(err.message, "error");
+        } finally {
+            setUndoingVendorId(null);
         }
     };
 
@@ -622,10 +914,38 @@ export default function ComparisonView({ projectId }: Props) {
                                                 ★ BEST
                                             </span>
                                         )}
+                                        {vendorUndoHistory[v.id]?.length > 0 && (
+                                            <button
+                                                onClick={() => handleUndoVendor(v.id)}
+                                                className="text-[10px] font-bold text-muted hover:text-warning bg-surface-hover hover:bg-warning/10 p-1.5 rounded-lg transition-colors"
+                                                disabled={generating || generatingVendorId !== null || undoingVendorId === v.id}
+                                                title="Undo vendor analysis"
+                                            >
+                                                {undoingVendorId === v.id ? (
+                                                    <Loader2 size={13} className="animate-spin text-warning" />
+                                                ) : (
+                                                    <Undo2 size={13} />
+                                                )}
+                                            </button>
+                                        )}
+                                        {vendorRedoHistory[v.id]?.length > 0 && (
+                                            <button
+                                                onClick={() => handleRedoVendor(v.id)}
+                                                className="text-[10px] font-bold text-muted hover:text-success bg-surface-hover hover:bg-success/10 p-1.5 rounded-lg transition-colors"
+                                                disabled={generating || generatingVendorId !== null || undoingVendorId === v.id}
+                                                title="Redo vendor analysis"
+                                            >
+                                                {undoingVendorId === v.id ? (
+                                                    <Loader2 size={13} className="animate-spin text-success" />
+                                                ) : (
+                                                    <Redo2 size={13} />
+                                                )}
+                                            </button>
+                                        )}
                                         <button
                                             onClick={() => handleGenerateVendor(v.id, v.vendorName)}
                                             className="text-[10px] font-bold text-muted hover:text-primary bg-surface-hover hover:bg-primary/10 p-1.5 rounded-lg transition-colors"
-                                            disabled={generating || generatingVendorId !== null}
+                                            disabled={generating || generatingVendorId !== null || undoingVendorId === v.id}
                                             title="Re-analyze this vendor"
                                         >
                                             {isAnalyzingThis ? (
@@ -689,15 +1009,15 @@ export default function ComparisonView({ projectId }: Props) {
             {hasResults ? (
                 <div className="flex-1 overflow-auto">
                     <table className="text-sm border-separate border-spacing-0" style={{ tableLayout: 'fixed', minWidth: `${50 + 250 * 2 + vendors.length * (350 + 120)}px` }}>
-                        <thead className="sticky top-0 z-10 bg-surface-hover shadow-[0_1px_2px_rgba(0,0,0,0.05)]">
+                        <thead className="sticky top-0 z-30 bg-surface-hover shadow-[0_1px_2px_rgba(0,0,0,0.05)]">
                             <tr className="bg-surface-hover border-b border-border">
-                                <th className="boq-th text-center px-3 py-2.5 w-[50px] min-w-[50px] max-w-[50px] sticky left-0 bg-surface-hover z-20 border-b border-r border-border">
+                                <th className="boq-th text-center px-3 py-2.5 w-[50px] min-w-[50px] max-w-[50px] sticky left-0 bg-surface-hover z-40 border-b border-r border-border">
                                     Sl
                                 </th>
-                                <th className="boq-th text-left px-3 py-2.5 w-[250px] min-w-[250px] sticky left-[50px] bg-surface-hover z-20 border-b border-r border-border">
+                                <th className="boq-th text-center px-3 py-2.5 w-[250px] min-w-[250px] sticky left-[50px] bg-surface-hover z-40 border-b border-r border-border">
                                     URS Requirement
                                 </th>
-                                <th className="boq-th text-left px-3 py-2.5 w-[250px] min-w-[250px] bg-surface-hover border-b border-r border-border">
+                                <th className="boq-th text-center px-3 py-2.5 w-[250px] min-w-[250px] sticky left-[300px] bg-surface-hover z-40 border-b border-r border-border">
                                     Required Spec
                                 </th>
                                 {vendors.map((v) => (
@@ -711,9 +1031,9 @@ export default function ComparisonView({ projectId }: Props) {
                                 ))}
                             </tr>
                             <tr className="bg-surface-hover border-b border-border">
-                                <th className="sticky left-0 bg-surface-hover z-20 border-b border-r border-border" />
-                                <th className="sticky left-[50px] bg-surface-hover z-20 border-b border-r border-border" />
-                                <th className="bg-surface-hover border-b border-r border-border" />
+                                <th className="sticky left-0 bg-surface-hover z-40 border-b border-r border-border" />
+                                <th className="sticky left-[50px] bg-surface-hover z-40 border-b border-r border-border" />
+                                <th className="sticky left-[300px] bg-surface-hover z-40 border-b border-r border-border" />
                                 {vendors.map((v) => (
                                     <React.Fragment key={`sub-${v.id}`}>
                                         <th className="boq-th text-center px-2 py-1.5 w-[350px] min-w-[350px] bg-surface-hover border-b border-r border-border text-[9px]">
@@ -730,10 +1050,10 @@ export default function ComparisonView({ projectId }: Props) {
                             {itemsBySection.map(({ section, items: sectionItems }) => (
                                 <React.Fragment key={`section-${section}`}>
                                     {/* Section Header Row */}
-                                    <tr className="bg-primary/5 border-b border-border">
+                                    <tr className="border-b border-border">
                                         <td
-                                            colSpan={3 + vendors.length * 2}
-                                            className="px-4 py-2 sticky left-0 z-10"
+                                            colSpan={3}
+                                            className="px-4 py-2 sticky left-0 bg-surface-hover z-10 border-r border-border"
                                         >
                                             <span className="text-[11px] font-extrabold text-primary uppercase tracking-wider">
                                                 {section}
@@ -742,6 +1062,7 @@ export default function ComparisonView({ projectId }: Props) {
                                                 ({sectionItems.length} {sectionItems.length === 1 ? "item" : "items"})
                                             </span>
                                         </td>
+                                        <td colSpan={vendors.length * 2} className="bg-surface-hover" />
                                     </tr>
                                     {sectionItems.map((item, itemIndex) => {
                                         const isExpanded = expandedRow === item.id;
@@ -776,7 +1097,7 @@ export default function ComparisonView({ projectId }: Props) {
                                                             </span>
                                                         </div>
                                                     </td>
-                                                    <td className="px-3 py-2.5 text-left text-[12px] text-body leading-relaxed border-b border-r border-border" style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+                                                    <td className="px-3 py-2.5 text-left text-[12px] text-body leading-relaxed sticky left-[300px] bg-surface z-10 border-b border-r border-border" style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
                                                         <span>
                                                             {item.specifications || "—"}
                                                         </span>
@@ -822,10 +1143,10 @@ export default function ComparisonView({ projectId }: Props) {
                                                 {/* Expanded remarks row */}
                                                 {isExpanded && (
                                                     <tr className="bg-surface-hover/30">
-                                                        <td />
+                                                        <td className="sticky left-0 bg-surface z-10 border-b border-r border-border" />
                                                         <td
                                                             colSpan={2}
-                                                            className="px-5 py-3 sticky left-[50px] bg-surface-hover/30 z-10"
+                                                            className="px-5 py-3 sticky left-[50px] bg-surface z-10 border-b border-r border-border"
                                                             style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', maxWidth: '500px' }}
                                                         >
                                                             <span className="text-[10px] font-bold text-muted uppercase tracking-wider">
@@ -868,14 +1189,36 @@ export default function ComparisonView({ projectId }: Props) {
                                                                                 </span>
                                                                             )}
                                                                         </div>
-                                                                        <button
-                                                                            onClick={(e) => { e.stopPropagation(); handleReEvalSingle(item.id, v.id); }}
-                                                                            disabled={isBusy || generating || generatingVendorId !== null}
-                                                                            className="text-[10px] text-muted hover:text-primary bg-surface-hover hover:bg-primary/10 p-1 rounded-md transition-colors flex items-center gap-1"
-                                                                            title="Re-evaluate this item"
-                                                                        >
-                                                                            {isBusy ? <Loader2 size={11} className="animate-spin text-primary" /> : <RefreshCw size={11} />}
-                                                                        </button>
+                                                                        <div className="flex items-center gap-1">
+                                                                            {undoHistory[`${item.id}_${v.id}`]?.length > 0 && (
+                                                                                <button
+                                                                                    onClick={(e) => { e.stopPropagation(); handleUndoSingle(item.id, v.id); }}
+                                                                                    disabled={isBusy || undoingId === `${item.id}_${v.id}` || generating || generatingVendorId !== null}
+                                                                                    className="text-[10px] text-muted hover:text-warning bg-surface-hover hover:bg-warning/10 p-1 rounded-md transition-colors flex items-center gap-1"
+                                                                                    title="Undo to previous version"
+                                                                                >
+                                                                                    {undoingId === `${item.id}_${v.id}` ? <Loader2 size={11} className="animate-spin text-warning" /> : <Undo2 size={11} />}
+                                                                                </button>
+                                                                            )}
+                                                                            {redoHistory[`${item.id}_${v.id}`]?.length > 0 && (
+                                                                                <button
+                                                                                    onClick={(e) => { e.stopPropagation(); handleRedoSingle(item.id, v.id); }}
+                                                                                    disabled={isBusy || undoingId === `${item.id}_${v.id}` || generating || generatingVendorId !== null}
+                                                                                    className="text-[10px] text-muted hover:text-success bg-surface-hover hover:bg-success/10 p-1 rounded-md transition-colors flex items-center gap-1"
+                                                                                    title="Redo to newer version"
+                                                                                >
+                                                                                    {undoingId === `${item.id}_${v.id}` ? <Loader2 size={11} className="animate-spin text-success" /> : <Redo2 size={11} />}
+                                                                                </button>
+                                                                            )}
+                                                                            <button
+                                                                                onClick={(e) => { e.stopPropagation(); handleReEvalSingle(item.id, v.id); }}
+                                                                                disabled={isBusy || undoingId === `${item.id}_${v.id}` || generating || generatingVendorId !== null}
+                                                                                className="text-[10px] text-muted hover:text-primary bg-surface-hover hover:bg-primary/10 p-1 rounded-md transition-colors flex items-center gap-1"
+                                                                                title="Re-evaluate this item"
+                                                                            >
+                                                                                {isBusy ? <Loader2 size={11} className="animate-spin text-primary" /> : <RefreshCw size={11} />}
+                                                                            </button>
+                                                                        </div>
                                                                     </div>
 
 
