@@ -570,7 +570,7 @@ export async function evaluateBatchItems(
 
     const ctx = isGroq
         ? extractBatchContext(vendorText, ursItems.map(i => ({ description: i.description, specifications: i.specifications })))
-        : extractSmartContext(vendorText, ursItems.map(i => i.description).join(" "), ursItems.map(i => i.specifications).join(" "));
+        : vendorText;
 
     const userPrompt = `## VENDOR DOCUMENTATION (${vendorName})\n${ctx}\n\n## URS REQUIREMENTS (${ursItems.length} items)\n\n${itemsList}\n\nEvaluate ALL ${ursItems.length} items based on the vendor documentation provided above. Respond with JSON using the item IDs as keys.`;
 
