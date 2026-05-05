@@ -94,32 +94,30 @@ export async function POST(req: NextRequest) {
             resolvedModel
         );
 
-        // Upsert results to DB
-        await prisma.$transaction(async (tx) => {
-            for (const [ursItemId, evaluation] of Object.entries(batchResults)) {
-                await tx.comparisonResult.upsert({
-                    where: {
-                        vendorProfileId_ursItemId: {
-                            vendorProfileId: vendorId,
-                            ursItemId,
-                        },
-                    },
-                    create: {
-                        projectId,
+        // Upsert results to DB (individual upserts — batch is small, no transaction needed)
+        for (const [ursItemId, evaluation] of Object.entries(batchResults)) {
+            await prisma.comparisonResult.upsert({
+                where: {
+                    vendorProfileId_ursItemId: {
                         vendorProfileId: vendorId,
                         ursItemId,
-                        vendorProposedSpec: evaluation.vendor_proposed_spec,
-                        status: evaluation.status,
-                        remarks: evaluation.remarks,
                     },
-                    update: {
-                        vendorProposedSpec: evaluation.vendor_proposed_spec,
-                        status: evaluation.status,
-                        remarks: evaluation.remarks,
-                    },
-                });
-            }
-        }, { timeout: 15000 });
+                },
+                create: {
+                    projectId,
+                    vendorProfileId: vendorId,
+                    ursItemId,
+                    vendorProposedSpec: evaluation.vendor_proposed_spec,
+                    status: evaluation.status,
+                    remarks: evaluation.remarks,
+                },
+                update: {
+                    vendorProposedSpec: evaluation.vendor_proposed_spec,
+                    status: evaluation.status,
+                    remarks: evaluation.remarks,
+                },
+            });
+        }
 
         // Log progress
         for (const [id, r] of Object.entries(batchResults)) {

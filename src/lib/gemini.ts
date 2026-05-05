@@ -695,10 +695,32 @@ async function handleRetryError(error: any, attempt: number, maxRetries: number)
 
 function parseJsonResponse(text: string): Record<string, any> {
     let cleaned = text.trim();
-    if (cleaned.includes("```json")) cleaned = cleaned.split("```json")[1].split("```")[0].trim();
-    else if (cleaned.includes("```")) cleaned = cleaned.split("```")[1].split("```")[0].trim();
-    try { return JSON.parse(cleaned); }
-    catch { throw new Error("Invalid AI response — could not parse JSON"); }
+
+    // Strategy 1: Extract from markdown code blocks
+    if (cleaned.includes("```json")) {
+        cleaned = cleaned.split("```json")[1].split("```")[0].trim();
+    } else if (cleaned.includes("```")) {
+        cleaned = cleaned.split("```")[1].split("```")[0].trim();
+    }
+
+    // Strategy 2: Try direct parse
+    try { return JSON.parse(cleaned); } catch {}
+
+    // Strategy 3: Find the outermost { ... } braces
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+        const extracted = cleaned.substring(firstBrace, lastBrace + 1);
+        try { return JSON.parse(extracted); } catch {}
+
+        // Strategy 4: Fix trailing commas and retry
+        const fixed = extracted.replace(/,\s*([}\]])/g, "$1");
+        try { return JSON.parse(fixed); } catch {}
+    }
+
+    // Log the raw response for debugging
+    console.error("Failed to parse AI response. First 500 chars:", cleaned.substring(0, 500));
+    throw new Error("Invalid AI response — could not parse JSON");
 }
 
 function normalizeStatus(raw: string | undefined): EvaluationResult["status"] {
