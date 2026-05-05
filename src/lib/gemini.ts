@@ -30,8 +30,8 @@ const MODEL_GEMINI_31_FLASH_LITE = "gemini-3.1-flash-lite-preview";
 const MODEL_LLAMA_3_3 = "llama-3.3-70b-versatile"; // 128k context logic
 const MODEL_LLAMA_SCOUT = "meta-llama/llama-4-scout-17b-16e-instruct";       // 10M context massive extraction
 
-// Priority Chain: Gemini 3.1 Flash -> Gemini 3.1 Flash Lite -> Llama 3.3 70B -> Llama 4 Scout
-const MODELS_CHAIN = [MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_LLAMA_3_3, MODEL_LLAMA_SCOUT];
+// Priority Chain: Gemini 3.1 Flash Lite -> Gemini 3.1 Flash -> Llama 3.3 70B -> Llama 4 Scout
+const MODELS_CHAIN = [MODEL_GEMINI_31_FLASH_LITE, MODEL_GEMINI_31_FLASH, MODEL_LLAMA_3_3, MODEL_LLAMA_SCOUT];
 let activeModelIndex = 0;
 
 const MAX_CONTEXT_CHARS = 16_000;
@@ -704,18 +704,18 @@ function parseJsonResponse(text: string): Record<string, any> {
     }
 
     // Strategy 2: Try direct parse
-    try { return JSON.parse(cleaned); } catch {}
+    try { return JSON.parse(cleaned); } catch { }
 
     // Strategy 3: Find the outermost { ... } braces
     const firstBrace = cleaned.indexOf("{");
     const lastBrace = cleaned.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace > firstBrace) {
         const extracted = cleaned.substring(firstBrace, lastBrace + 1);
-        try { return JSON.parse(extracted); } catch {}
+        try { return JSON.parse(extracted); } catch { }
 
         // Strategy 4: Fix trailing commas and retry
         const fixed = extracted.replace(/,\s*([}\]])/g, "$1");
-        try { return JSON.parse(fixed); } catch {}
+        try { return JSON.parse(fixed); } catch { }
     }
 
     // Log the raw response for debugging
