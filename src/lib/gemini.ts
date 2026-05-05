@@ -549,6 +549,116 @@ Respond with JSON using the item ID as key.`;
     return allResults;
 }
 
+// ── Single-Batch Evaluation (for client-side orchestration) ──
+
+/**
+ * Evaluate a single batch of URS items in ONE AI call.
+ * No loops, no delays — designed for client-side orchestration.
+ */
+export async function evaluateBatchItems(
+    vendorName: string,
+    vendorText: string,
+    ursItems: { id: string; description: string; specifications: string; remarks?: string }[],
+    model?: string
+): Promise<BulkEvaluationResult> {
+    const activeModelId = model || MODELS_CHAIN[activeModelIndex];
+    const isGroq = [MODEL_LLAMA_3_3, MODEL_LLAMA_SCOUT].includes(activeModelId);
+
+    const itemsList = ursItems.map((item, idx) =>
+        `### Item ${idx + 1} (ID: ${item.id})\n**Description**: ${item.description}\n**Required Specification**: ${item.specifications || "Evaluate based on description"}${item.remarks ? `\n**Context**: ${item.remarks}` : ""}`
+    ).join("\n\n");
+
+    const ctx = isGroq
+        ? extractBatchContext(vendorText, ursItems.map(i => ({ description: i.description, specifications: i.specifications })))
+        : extractSmartContext(vendorText, ursItems.map(i => i.description).join(" "), ursItems.map(i => i.specifications).join(" "));
+
+    const userPrompt = `## VENDOR DOCUMENTATION (${vendorName})\n${ctx}\n\n## URS REQUIREMENTS (${ursItems.length} items)\n\n${itemsList}\n\nEvaluate ALL ${ursItems.length} items based on the vendor documentation provided above. Respond with JSON using the item IDs as keys.`;
+
+    const results: BulkEvaluationResult = {};
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const text = await geminiChat(SYSTEM_PROMPT, userPrompt, 0.05, model);
+            const parsed = parseJsonResponse(text);
+            for (const item of ursItems) {
+                const r = parsed[item.id];
+                results[item.id] = r
+                    ? { vendor_proposed_spec: r.vendor_proposed_spec || "Not found", status: normalizeStatus(r.status), remarks: r.remarks || "" }
+                    : { vendor_proposed_spec: "Not found", status: "Not Mentioned", remarks: "Missed in batch evaluation." };
+            }
+            return results;
+        } catch (error: any) {
+            if (await handleRetryError(error, attempt, 3)) continue;
+            throw error;
+        }
+    }
+
+    // Fallback if all retries exhausted
+    for (const item of ursItems) {
+        if (!results[item.id]) {
+            results[item.id] = { vendor_proposed_spec: "Evaluation failed", status: "Not Mentioned", remarks: "Batch evaluation failed. Please retry." };
+        }
+    }
+    return results;
+}
+
+/**
+ * Re-evaluate a single item with deeper context (Pass 2).
+ * No loops, no delays — designed for client-side orchestration.
+ */
+export async function evaluatePass2Item(
+    vendorName: string,
+    vendorText: string,
+    item: { id: string; description: string; specifications: string; remarks?: string },
+    previousStatus: string,
+    previousRemarks: string,
+    model?: string
+): Promise<EvaluationResult> {
+    const deepCtx = extractDeepContext(vendorText, item.description, item.specifications);
+
+    const prompt = `## SECOND-PASS DEEP EVALUATION
+This item was initially evaluated as "${previousStatus}".
+Previous remarks: ${previousRemarks}
+
+You are now given EXPANDED vendor context. Search AGGRESSIVELY for ANY related information.
+
+**Item ID**: ${item.id}
+**Description**: ${item.description}
+**Required Specification**: ${item.specifications || "Evaluate based on description"}
+${item.remarks ? `**Context**: ${item.remarks}` : ""}
+
+## EXPANDED VENDOR DOCUMENTATION (${vendorName})
+${deepCtx}
+
+IMPORTANT: Only confirm "Not Mentioned" if ABSOLUTELY CERTAIN nothing relates to this requirement.
+Respond with JSON using the item ID as key.`;
+
+    const text = await geminiChat(SYSTEM_PROMPT, prompt, 0.05, model);
+    const parsed = parseJsonResponse(text);
+    const r = parsed[item.id] || Object.values(parsed)[0];
+    if (!r) throw new Error("No result in Pass 2 response");
+
+    return {
+        vendor_proposed_spec: r.vendor_proposed_spec || "Not found",
+        status: normalizeStatus(r.status),
+        remarks: `[Pass 2] ${r.remarks || ""}`,
+    };
+}
+
+/**
+ * Returns recommended batch config based on model selection.
+ */
+export function getBatchConfig(model?: string) {
+    const activeModelId = model || MODELS_CHAIN[activeModelIndex];
+    const isGroq = [MODEL_LLAMA_3_3, MODEL_LLAMA_SCOUT].includes(activeModelId);
+    return {
+        batchSize: isGroq ? ITEMS_PER_BATCH : 100, // Gemini does one-pass
+        delayMs: isGroq ? GROQ_INTER_REQUEST_DELAY_MS : INTER_REQUEST_DELAY_MS,
+        isGroq,
+        modelId: activeModelId,
+    };
+}
+
 // ── Helpers ──
 
 async function callWithRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {

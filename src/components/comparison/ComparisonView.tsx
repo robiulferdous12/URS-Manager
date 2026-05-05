@@ -47,6 +47,10 @@ export default function ComparisonView({ projectId }: Props) {
     const [vendorUndoHistory, setVendorUndoHistory] = useState<Record<string, ComparisonResult[][]>>({});
     const [vendorRedoHistory, setVendorRedoHistory] = useState<Record<string, ComparisonResult[][]>>({});
     const [undoingVendorId, setUndoingVendorId] = useState<string | null>(null);
+    const [evalProgress, setEvalProgress] = useState<{
+        phase: string; vendorName: string; batch: number; totalBatches: number;
+        done: number; total: number; delay: number;
+    } | null>(null);
 
     const fetchData = useCallback(async () => {
         try {
@@ -96,65 +100,122 @@ export default function ComparisonView({ projectId }: Props) {
     };
 
     // ──────────────────────────────────────────────
-    // Generate AI Comparison
+    // Client-Side Batch Orchestration
     // ──────────────────────────────────────────────
+
+    const waitWithCountdown = async (ms: number) => {
+        for (let d = ms; d > 0; d -= 1000) {
+            setEvalProgress(p => p ? { ...p, delay: Math.ceil(d / 1000) } : p);
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        setEvalProgress(p => p ? { ...p, delay: 0 } : p);
+    };
+
+    const runBatchEvaluation = async (targetVendorId?: string) => {
+        const planUrl = `/api/comparison/generate-batch?projectId=${projectId}${targetVendorId ? `&vendorId=${targetVendorId}` : ""}&model=${selectedModel}`;
+        const planRes = await fetch(planUrl);
+        const plan = await planRes.json();
+        if (!planRes.ok) throw new Error(plan.error);
+
+        if (plan.vendors.length === 0) {
+            return plan.skippedVendors?.length > 0
+                ? `All vendors already analyzed. Skipped: ${plan.skippedVendors.join(", ")}`
+                : "No vendors to analyze.";
+        }
+
+        const allResults: Record<string, any> = {};
+
+        for (const vendor of plan.vendors) {
+            const batches: any[][] = [];
+            for (let i = 0; i < plan.items.length; i += plan.batchSize) {
+                batches.push(plan.items.slice(i, i + plan.batchSize));
+            }
+
+            setEvalProgress({ phase: "evaluating", vendorName: vendor.name, batch: 0, totalBatches: batches.length, done: 0, total: plan.items.length, delay: 0 });
+
+            for (let b = 0; b < batches.length; b++) {
+                setEvalProgress(p => p ? { ...p, batch: b + 1, done: b * plan.batchSize } : p);
+
+                const res = await fetch("/api/comparison/generate-batch", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ projectId, vendorId: vendor.id, items: batches[b], model: selectedModel }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error);
+                Object.assign(allResults, data.results);
+                setEvalProgress(p => p ? { ...p, done: Math.min((b + 1) * plan.batchSize, plan.items.length) } : p);
+
+                if (b < batches.length - 1 && plan.delayMs > 0) {
+                    await waitWithCountdown(plan.delayMs);
+                }
+            }
+
+            // Pass 2: Re-evaluate Not Mentioned / Partial items
+            const pass2Items = plan.items.filter((item: any) => {
+                const r = allResults[item.id];
+                return r && (r.status === "Not Mentioned" || r.status === "Partial");
+            });
+
+            if (pass2Items.length > 0 && pass2Items.length <= 15) {
+                setEvalProgress(p => p ? { ...p, phase: "pass2", batch: 0, totalBatches: pass2Items.length, done: 0, total: pass2Items.length, delay: 0 } : p);
+
+                for (let i = 0; i < pass2Items.length; i++) {
+                    if (i > 0 && plan.delayMs > 0) await waitWithCountdown(plan.delayMs);
+                    setEvalProgress(p => p ? { ...p, batch: i + 1, done: i } : p);
+                    const item = pass2Items[i];
+                    const prev = allResults[item.id];
+
+                    try {
+                        const res = await fetch("/api/comparison/generate-batch", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                projectId, vendorId: vendor.id, model: selectedModel,
+                                pass2Item: item, previousStatus: prev?.status, previousRemarks: prev?.remarks,
+                            }),
+                        });
+                        const data = await res.json();
+                        if (data.results) Object.assign(allResults, data.results);
+                    } catch { /* Pass 2 failures are non-fatal */ }
+
+                    setEvalProgress(p => p ? { ...p, done: i + 1 } : p);
+                }
+            }
+        }
+
+        const vals = Object.values(allResults) as any[];
+        const c = { m: vals.filter(r => r.status === "Meets").length, d: vals.filter(r => r.status === "Does Not Meet").length, p: vals.filter(r => r.status === "Partial").length, n: vals.filter(r => r.status === "Not Mentioned").length };
+        return `Analysis complete: ${c.m} Meets, ${c.d} Doesn't Meet, ${c.p} Partial, ${c.n} Not Mentioned`;
+    };
 
     const handleGenerate = async () => {
         try {
             setGenerating(true);
             setError(null);
-
-            const res = await fetch("/api/comparison/generate", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ projectId, model: selectedModel }),
-            });
-
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || "Failed to generate comparison");
-
-            // Refresh results
+            const msg = await runBatchEvaluation(undefined);
             await fetchData();
-
-            if (data.message) {
-                showMessage(data.message, "success");
-            } else {
-                const { statusCounts, skippedVendors } = data;
-                let msg = `Analysis complete: ${statusCounts.meets} Meets, ${statusCounts.doesNotMeet} Doesn't Meet, ${statusCounts.partial} Partial, ${statusCounts.notMentioned} Not Mentioned`;
-                if (skippedVendors?.length > 0) {
-                    msg += ` (${skippedVendors.length} already analyzed — skipped)`;
-                }
-                showMessage(msg, "success");
-            }
+            showMessage(msg, "success");
         } catch (err: any) {
             showMessage(err.message, "error");
         } finally {
             setGenerating(false);
+            setEvalProgress(null);
         }
     };
 
     const handleGenerateVendor = async (vendorId: string, vendorName: string) => {
         const currentVendorResults = results.filter((r) => r.vendorProfileId === vendorId);
-        
         try {
             setGeneratingVendorId(vendorId);
             setError(null);
-
-            const res = await fetch("/api/comparison/generate", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ projectId, vendorId, model: selectedModel }),
-            });
-
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || "Failed to analyze vendor");
+            const msg = await runBatchEvaluation(vendorId);
 
             if (currentVendorResults.length > 0) {
                 setVendorUndoHistory(prev => ({
                     ...prev,
                     [vendorId]: [...(prev[vendorId] || []), currentVendorResults]
                 }));
-                // Clear redo history when new evaluation occurs
                 setVendorRedoHistory((prev) => {
                     const newRedo = { ...prev };
                     delete newRedo[vendorId];
@@ -163,18 +224,15 @@ export default function ComparisonView({ projectId }: Props) {
             }
 
             await fetchData();
-
-            const { statusCounts } = data;
-            showMessage(
-                `${vendorName}: ${statusCounts.meets} Meets, ${statusCounts.doesNotMeet} Doesn't Meet, ${statusCounts.partial} Partial, ${statusCounts.notMentioned} Not Mentioned`,
-                "success"
-            );
+            showMessage(`${vendorName}: ${msg}`, "success");
         } catch (err: any) {
             showMessage(err.message, "error");
         } finally {
             setGeneratingVendorId(null);
+            setEvalProgress(null);
         }
     };
+
 
     const handleReEvalSingle = async (ursItemId: string, vendorId: string) => {
         const key = `${ursItemId}_${vendorId}`;
@@ -760,15 +818,26 @@ export default function ComparisonView({ projectId }: Props) {
                         <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout</option>
                     </select>
 
-                    {generating && (
-                        <span className="text-xs text-muted animate-pulse">
-                            AI is evaluating new vendors...
-                        </span>
+                    {evalProgress && (
+                        <div className="flex items-center gap-2 text-xs">
+                            <Loader2 size={14} className="animate-spin text-primary" />
+                            <div className="flex flex-col leading-tight">
+                                <span className="font-semibold text-heading">
+                                    {evalProgress.phase === "pass2" ? "🔍 Pass 2" : "🧠 Evaluating"} {evalProgress.vendorName}
+                                </span>
+                                <span className="text-muted">
+                                    {evalProgress.phase === "pass2"
+                                        ? `Re-checking ${evalProgress.done}/${evalProgress.total} items`
+                                        : `Batch ${evalProgress.batch}/${evalProgress.totalBatches} · ${evalProgress.done}/${evalProgress.total} items`}
+                                    {evalProgress.delay > 0 && ` · ⏳ ${evalProgress.delay}s cooldown`}
+                                </span>
+                            </div>
+                        </div>
                     )}
 
-                    {generatingVendorId && (
+                    {(generating || generatingVendorId) && !evalProgress && (
                         <span className="text-xs text-muted animate-pulse">
-                            Re-analyzing vendor...
+                            Preparing evaluation plan...
                         </span>
                     )}
 
